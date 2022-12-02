@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 // use anyhow::{anyhow, Result};
 use curp::{client::Client as CurpClient, cmd::ProposeId};
 use etcd_client::Client as EtcdClient;
+use tracing::debug;
 use uuid::Uuid;
 
 use crate::{
@@ -84,6 +85,7 @@ impl Client {
     /// If `CurpClient` or `EtcdClient` failed to send request
     #[inline]
     pub async fn put(&mut self, request: PutRequest) -> Result<PutResponse, ClientError> {
+        debug!("put");
         if self.use_curp_client {
             let key_ranges = vec![KeyRange {
                 start: request.key().to_vec(),
@@ -95,7 +97,10 @@ impl Client {
             let propose_id = self.generate_propose_id();
             let bin_req = bincode::serialize(&RequestWrapper::RequestOp(request_op))?;
             let cmd = Command::new(key_ranges, bin_req, propose_id);
+            debug!("curp client propose");
             let cmd_res = self.curp_client.propose(cmd).await?;
+            debug!("curp client proposed");
+
             let response_op: ResponseOp = cmd_res.decode().into();
             if let Some(Response::ResponsePut(response)) = response_op.response {
                 Ok(response)

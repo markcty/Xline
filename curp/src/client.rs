@@ -2,7 +2,7 @@ use std::{fmt::Debug, iter, marker::PhantomData, net::SocketAddr, sync::Arc, tim
 
 use futures::{pin_mut, stream::FuturesUnordered, StreamExt};
 use opentelemetry::global;
-use tracing::{info_span, instrument, warn, Instrument};
+use tracing::{debug, info_span, instrument, warn, Instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::{
@@ -87,6 +87,7 @@ where
                     continue;
                 }
             };
+            // debug!("receive response, term: {}", resp.term());
             let term_valid = match resp.term() {
                 t if t > max_term => {
                     // state reset
@@ -98,12 +99,18 @@ where
                 t if t < max_term => false,
                 _ => true,
             };
+            debug!("receive response, term: {}, {term_valid}", resp.term());
             if term_valid {
                 resp.map_or_else::<C, _, _, _>(
                     |er| {
                         if let Some(er) = er {
+                            debug!("receive executed result");
                             execute_result = Some(er);
+                        } else {
+                            debug!("empty");
                         }
+                        debug!("here");
+
                         ok_cnt = ok_cnt.wrapping_add(1);
                         Ok(())
                     },
@@ -118,6 +125,7 @@ where
                 )??;
             }
             if (ok_cnt >= major_cnt) && execute_result.is_some() {
+                debug!("fast round succeeded!");
                 return Ok((execute_result, true));
             }
         }
@@ -131,6 +139,7 @@ where
         cmd_arc: Arc<C>,
     ) -> Result<(<C as Command>::ASR, Option<<C as Command>::ER>), ProposeError> {
         let mut tr = tonic::Request::new(WaitSyncedRequest::new(cmd_arc.id())?);
+        tr.set_timeout(Duration::from_secs(5));
         let rpc_span = info_span!("client wait_synced");
         global::get_text_map_propagator(|prop| {
             prop.inject_context(&rpc_span.context(), &mut InjectMap(tr.metadata_mut()));
@@ -153,6 +162,7 @@ where
             .await
         {
             Ok(resp) => {
+                debug!("slow round succeed");
                 let resp = resp.into_inner();
                 resp.map_success_error::<C, _, _, _>(Ok, |e| Err(ProposeError::SyncedError(e)))
             }
@@ -183,6 +193,7 @@ where
             futures::future::Either::Left((fast_result, slow_round)) => {
                 let (fast_er, success) = fast_result?;
                 if success {
+                    debug!("fast propose succeeded");
                     #[allow(clippy::unwrap_used)]
                     // when success is true fast_er must be Some
                     Ok(fast_er.unwrap())

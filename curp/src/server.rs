@@ -1,4 +1,5 @@
 use std::cmp::{min, Ordering};
+use std::time::Duration;
 use std::{
     collections::{HashMap, VecDeque},
     fmt::Debug,
@@ -17,6 +18,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::Instant;
 use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_stream::wrappers::TcpListenerStream;
+use tracing::log::warn;
 use tracing::{debug, error, info, instrument, Span};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -42,7 +44,7 @@ use crate::{
 pub(crate) static DEFAULT_SERVER_PORT: u16 = 12345;
 
 /// Default after sync task count
-pub static DEFAULT_AFTER_SYNC_CNT: usize = 10;
+pub static DEFAULT_AFTER_SYNC_CNT: usize = 1;
 
 /// The Rpc Server to handle rpc requests
 /// This Wrapper is introduced due to the `MadSim` rpc lib
@@ -227,7 +229,7 @@ impl<C: Command + 'static> SpeculativePool<C> {
     /// Push a new command into spec pool if it has not been marked ready
     pub(crate) fn push(&mut self, cmd: C) {
         if self.ready.remove(cmd.id()).is_none() {
-            debug!("insert cmd {:?} to spec pool", cmd.id());
+            // debug!("insert cmd {:?} to spec pool", cmd.id());
             self.pool.push_back(cmd);
         }
     }
@@ -452,6 +454,7 @@ impl<C: 'static + Command, CE: 'static + CommandExecutor<C>> Protocol<C, CE> {
             tokio::spawn(async move {
                 loop {
                     let sync_compl_result = rx.recv().await;
+                    debug!("bg sync started");
 
                     /// Call `after_sync` function. As async closure is still nightly, we
                     /// use macro here.
@@ -476,13 +479,21 @@ impl<C: 'static + Command, CE: 'static + CommandExecutor<C>> Protocol<C, CE> {
 
                             let cmd_id = cmd.id().clone();
 
+                            debug!("after sync cmd {:?}", cmd.id());
                             let option = cmd_board_clone.map_lock(|board| {
-                                match board.get(&cmd_id) {
+                                let value = board.get(&cmd_id);
+                                match value {
                                     Some(value) => match *value {
                                         CmdBoardValue::Wait4Sync(ref event_state) => {
                                             match event_state.1 {
-                                                CmdBoardState::NeedExecute => Some((true, false)),
-                                                CmdBoardState::NoExecute => Some((false, false)),
+                                                CmdBoardState::NeedExecute => {
+                                                    debug!("need execute");
+                                                    Some((true, false))
+                                                }
+                                                CmdBoardState::NoExecute => {
+                                                    debug!("no execute");
+                                                    Some((false, false))
+                                                }
                                                 CmdBoardState::FinalResult(_) => {
                                                     // Should not hit this state, but just log it
                                                     error!("Should not get final result");
@@ -490,7 +501,6 @@ impl<C: 'static + Command, CE: 'static + CommandExecutor<C>> Protocol<C, CE> {
                                                 }
                                             }
                                         }
-
                                         CmdBoardValue::EarlyArrive(_) => {
                                             error!("Should not get early arrive while executing");
                                             None
@@ -506,6 +516,7 @@ impl<C: 'static + Command, CE: 'static + CommandExecutor<C>> Protocol<C, CE> {
                                         cmd_id
                                     ))
                                 } else if need_execute {
+                                    debug!("execute cmd {:?}", cmd.id());
                                     match cmd.execute(dispatch_executor.as_ref()).await {
                                         Ok(er) => call_after_sync!(cmd, index, Some(er)),
                                         Err(e) => WaitSyncedResponse::new_error::<C>(&format!(
@@ -517,7 +528,13 @@ impl<C: 'static + Command, CE: 'static + CommandExecutor<C>> Protocol<C, CE> {
                                     call_after_sync!(cmd, index, None)
                                 };
 
-                                let _ignore = notifier.send(reply);
+                                // *notifier.lock() = Some(reply);
+                                // debug!("mark cmd {:?} sync done", cmd_id);
+                                if let Err(err) = notifier.send(reply) {
+                                    warn!("can't mark cmd {:?} sync done, {err}", cmd_id);
+                                } else {
+                                    debug!("mark cmd {:?} sync done", cmd_id);
+                                }
                                 (after_sync_result, cmd_id)
                             } else {
                                 continue;
@@ -526,6 +543,8 @@ impl<C: 'static + Command, CE: 'static + CommandExecutor<C>> Protocol<C, CE> {
                         // TODO: handle the sync task stop, usually we should stop working
                         Err(e) => unreachable!("sync manager stopped, {}", e),
                     };
+
+                    debug!("here1");
 
                     cmd_board_clone.map_lock(|mut board| {
                         if let Some(CmdBoardValue::Wait4Sync(event_state)) = board.remove(&cmd_id) {
@@ -538,11 +557,15 @@ impl<C: 'static + Command, CE: 'static + CommandExecutor<C>> Protocol<C, CE> {
                             });
 
                             if let CmdBoardValue::Wait4Sync(ref es) = *value {
+                                debug!("notify wait synced, cmd: {:?}", cmd_id);
                                 es.0.notify(1);
                             }
                         }
                     });
+                    debug!("here2");
+
                     spec_clone.lock().mark_ready(&cmd_id);
+                    debug!("here3");
                 }
             })
         })
@@ -711,8 +734,10 @@ impl<C: 'static + Command, CE: 'static + CommandExecutor<C>> Protocol<C, CE> {
                 sync_notify
             };
 
+            debug!("execute cmd {:?}", cmd.id());
             // speculative execution
             let er = cmd.execute(self.cmd_executor.as_ref()).await;
+            debug!("executed cmd {:?}", cmd.id());
 
             sync_notify.notify(1); // the command is ready to be synced
             match er {
@@ -763,7 +788,10 @@ impl<C: 'static + Command, CE: 'static + CommandExecutor<C>> Protocol<C, CE> {
                 let fr_or_listener = match board.get(&id) {
                     Some(value) => match *value {
                         CmdBoardValue::Wait4Sync(ref event_state) => match event_state.1 {
-                            CmdBoardState::FinalResult(_) => FrOrListener::MetFr,
+                            CmdBoardState::FinalResult(_) => {
+                                debug!("fr");
+                                FrOrListener::MetFr
+                            }
                             CmdBoardState::NeedExecute | CmdBoardState::NoExecute => {
                                 FrOrListener::Listener(event_state.0.listen())
                             }
@@ -784,6 +812,7 @@ impl<C: 'static + Command, CE: 'static + CommandExecutor<C>> Protocol<C, CE> {
                 if let FrOrListener::MetFr = fr_or_listener {
                     if let Some(CmdBoardValue::Wait4Sync(event_state)) = board.remove(&id) {
                         if let CmdBoardState::FinalResult(fr) = event_state.1 {
+                            debug!("wait synced succeeded");
                             return FrOrListener::Fr(Box::new(
                                 fr.map_err(|e| {
                                     tonic::Status::internal(format!(
@@ -802,8 +831,17 @@ impl<C: 'static + Command, CE: 'static + CommandExecutor<C>> Protocol<C, CE> {
             });
 
             match fr_or_listener {
-                FrOrListener::Fr(fr) => break *fr,
-                FrOrListener::Listener(l) => l.await,
+                FrOrListener::Fr(fr) => {
+                    debug!("wait synced succeeded");
+                    break *fr;
+                }
+                FrOrListener::Listener(_l) => {
+                    debug!("start waiting for {:?}", id);
+                    // _l.await;
+                    // let _gin = tokio::time::timeout(Duration::from_millis(50), l).await;
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    debug!("end waiting for {:?}", id);
+                }
                 FrOrListener::MetFr => {
                     unreachable!("EmptyFr is the internal state, should not appear here")
                 }
@@ -817,8 +855,10 @@ impl<C: 'static + Command, CE: 'static + CommandExecutor<C>> Protocol<C, CE> {
         request: tonic::Request<AppendEntriesRequest>,
     ) -> Result<tonic::Response<AppendEntriesResponse>, tonic::Status> {
         let req = request.into_inner();
-        debug!("append_entries received: term({}), commit({}), prev_log_index({}), prev_log_term({}), {} entries", 
+        if !req.entries.is_empty() {
+            debug!("append_entries received: term({}), commit({}), prev_log_index({}), prev_log_term({}), {} entries", 
             req.term, req.leader_commit, req.prev_log_index, req.prev_log_term, req.entries.len());
+        }
 
         let state = self.state.upgradable_read();
 

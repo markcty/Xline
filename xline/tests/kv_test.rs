@@ -2,14 +2,29 @@ mod common;
 
 use std::error::Error;
 
+use tracing_subscriber::{fmt, EnvFilter};
 use xline::client::kv_types::{
     DeleteRangeRequest, PutRequest, RangeRequest, SortOrder, SortTarget,
 };
 
 use crate::common::Cluster;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_kv_put() -> Result<(), Box<dyn Error>> {
+    // Configure a custom event formatter
+    let format = fmt::format()
+        .with_thread_ids(true) // include the thread ID of the current thread
+        .with_line_number(true)
+        .without_time()
+        .compact(); // use the `Compact` formatting style.
+
+    // Create a `fmt` subscriber that uses our custom event format, and set it
+    // as the default.
+    tracing_subscriber::fmt()
+        .event_format(format)
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
     struct TestCase {
         req: PutRequest,
         want_err: bool,

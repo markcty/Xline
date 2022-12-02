@@ -17,6 +17,7 @@ use clippy_utilities::{NumericCast, OverflowArithmetic};
 use event_listener::Event;
 use parking_lot::Mutex;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use tracing::{debug, warn};
 
 use crate::cmd::ConflictCheck;
 
@@ -102,6 +103,7 @@ impl<K: Eq + Hash + Clone + ConflictCheck, M> KeyBasedChannel<SpmcKeysMessage<K,
 
     /// Move a message for the `key` from pending to inner
     fn mark_done(&mut self, km: &SpmcKeysMessage<K, M>) {
+        debug!("mark msg done");
         let ready_cnt = if let Some(successor) = self.successor.remove(km) {
             successor
                 .into_iter()
@@ -175,9 +177,12 @@ impl<K, M> Clone for SpmcKeybasedReceiver<K, M> {
     }
 }
 
-impl<K: Eq + Hash + Clone + ConflictCheck, M> SpmcKeybasedReceiver<K, M> {
+impl<K: 'static + Eq + Hash + Clone + ConflictCheck + Send, M: 'static + Send>
+    SpmcKeybasedReceiver<K, M>
+{
     /// Receive a message
     /// Return (message, `msg_complete_sender`)
+    #[allow(dead_code)]
     pub(crate) async fn recv(
         &self,
     ) -> Result<
@@ -192,6 +197,89 @@ impl<K: Eq + Hash + Clone + ConflictCheck, M> SpmcKeybasedReceiver<K, M> {
             .await
             .recv()
             .map(|msg| (msg, self.done_tx.clone()))
+    }
+
+    /// Receive a message
+    /// Return (message, `msg_complete_sender`)
+    #[allow(dead_code)]
+    pub(crate) async fn recv_test(
+        &self,
+    ) -> Result<
+        (
+            SpmcKeysMessage<K, M>,
+            UnboundedSender<SpmcKeysMessage<K, M>>,
+            Arc<Event>,
+        ),
+        RecvError,
+    > {
+        let (msg, channel4complete) = {
+            let mut inner = self.inner.lock().await;
+            let msg = inner.recv()?;
+            let channel4complete = Arc::clone(&inner.channel);
+            (msg, channel4complete)
+        };
+
+        let (done_tx, mut done_rx) = unbounded_channel();
+        let event = Arc::new(Event::new());
+        // let event_cloned = Arc::clone(&event);
+        let _ignore = tokio::spawn(async move {
+            debug!("mark done spawned");
+            debug!("mark done get");
+            loop {
+                if let Ok(msg) = done_rx.try_recv() {
+                    debug!("done msg");
+                    channel4complete.lock().mark_done(&msg);
+                } else {
+                    warn!("can't mark done");
+                }
+                debug!("mark done checked");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        });
+        Ok((msg, done_tx, event))
+    }
+
+    /// Receive a message
+    /// Return (message, `msg_complete_sender`)
+    #[allow(unused_variables)]
+    #[allow(dead_code)]
+    pub(crate) async fn recv_test_test(
+        &self,
+    ) -> Result<
+        (
+            SpmcKeysMessage<K, M>,
+            Arc<Mutex<Option<SpmcKeysMessage<K, M>>>>,
+            // Arc<Mutex<i32>>,
+        ),
+        RecvError,
+    > {
+        let (msg, channel4complete) = {
+            let mut inner = self.inner.lock().await;
+            debug!("locked");
+            let msg = inner.recv()?;
+            let channel4complete = Arc::clone(&inner.channel);
+            (msg, channel4complete)
+        };
+
+        let done = Arc::new(Mutex::new(None));
+        let done_cloned = Arc::clone(&done);
+        let _ignore = tokio::spawn(async move {
+            debug!("mark done spawned");
+            loop {
+                if let Some(msg) = done_cloned.lock().take() {
+                    debug!("done msg");
+                    channel4complete.lock().mark_done(&msg);
+                    debug!("done done msg");
+                    return;
+                }
+                warn!("can't mark done");
+
+                // debug!("{}", *done_cloned.lock());
+                debug!("mark done checked");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        });
+        Ok((msg, done))
     }
 
     /// Receive a message with a `timeout`.
@@ -235,9 +323,12 @@ pub(crate) fn channel<
     let channel4complete = Arc::<_>::clone(&inner_channel);
 
     let _ignore_handler = tokio::spawn(async move {
+        debug!("bg mark done started");
         while let Some(msg) = done_rx.recv().await {
+            debug!("done msg");
             channel4complete.lock().mark_done(&msg);
         }
+        warn!("bg mark done exited");
     });
 
     (

@@ -8,6 +8,7 @@ use event_listener::{Event, EventListener};
 use itertools::Itertools;
 use parking_lot::Mutex;
 use thiserror::Error;
+use tracing::debug;
 
 use crate::cmd::ConflictCheck;
 
@@ -196,8 +197,14 @@ impl<KM> KeyBasedReceiverInner<KM> {
     pub(crate) fn recv(&mut self) -> Result<KM, RecvError> {
         loop {
             match self.get_msg_or_listener() {
-                MessageOrListener::Message(msg) => return Ok(msg),
-                MessageOrListener::Listen(l) => l.wait(),
+                MessageOrListener::Message(msg) => {
+                    debug!("mpsc received");
+                    return Ok(msg);
+                }
+                MessageOrListener::Listen(l) => {
+                    debug!("start listen mpsc");
+                    l.wait()
+                }
                 MessageOrListener::Stop => return Err(RecvError::ChannelStop),
             }
         }

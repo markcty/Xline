@@ -364,7 +364,7 @@ impl<C: Command + 'static> SyncManager<C> {
             AppendEntriesRequest::new_heartbeat(term, prev_log_index, prev_log_term, leader_commit);
 
         // send append_entries request and receive response
-        debug!("heartbeat sent to {}", connect.addr);
+        // debug!("heartbeat sent to {}", connect.addr);
         let resp = connect.append_entries(req, Self::RPC_TIMEOUT).await;
 
         #[allow(clippy::unwrap_used)]
@@ -410,6 +410,7 @@ impl<C: Command + 'static> SyncManager<C> {
                     // TODO: execution of leaders and followers should be merged
                     // leader commits a log by sending it through compl_chan
                     if state.is_leader() {
+                        debug!("cmd {:?} can be synced", cmd.id());
                         if comp_chan
                             .send(
                                 cmd.keys(),
@@ -420,6 +421,7 @@ impl<C: Command + 'static> SyncManager<C> {
                             error!("The comp_chan is closed on the remote side");
                             break;
                         }
+                        debug!("cmd {:?} sent to comp chan", cmd.id());
                     } else {
                         // followers execute commands directly
                         let cmd_executor = Arc::clone(&cmd_executor);
