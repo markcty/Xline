@@ -8,15 +8,19 @@ use parking_lot::{lock_api::RwLockUpgradableReadGuard, Mutex, RwLock};
 use tokio::{sync::mpsc, time::Instant};
 use tracing::{debug, error, info, warn};
 
+use super::{
+    cmd_board::{CmdState, CommandBoard},
+    SyncMessage,
+};
 use crate::{
     channel::{key_mpsc::MpscKeyBasedReceiver, key_spmc, RecvError},
     cmd::{Command, CommandExecutor},
-    cmd_board::{CmdState, CommandBoard},
-    cmd_execute_worker::{execute_worker, CmdExecuteSender, ExecuteMessage, N_EXECUTE_WORKERS},
     log::LogEntry,
-    message::TermNum,
     rpc::{self, AppendEntriesRequest, Connect, VoteRequest, WaitSyncedResponse},
-    server::{ServerRole, SpeculativePool, State},
+    server::{
+        cmd_execute_worker::{execute_worker, CmdExecuteSender, ExecuteMessage, N_EXECUTE_WORKERS},
+        ServerRole, SpeculativePool, State,
+    },
     shutdown::Shutdown,
     LogIndex,
 };
@@ -37,7 +41,7 @@ pub(crate) async fn run_bg_tasks<C: Command + 'static, CE: 'static + CommandExec
     let connects = rpc::try_connect(others).await;
 
     // notify when a broadcast of append_entries is needed immediately
-    let (ae_trigger, ae_trigger_rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
+    let (ae_trigger, ae_trigger_rx) = mpsc::unbounded_channel::<usize>();
 
     let bg_ae_handle = tokio::spawn(bg_append_entries(
         connects.clone(),
@@ -61,32 +65,6 @@ pub(crate) async fn run_bg_tasks<C: Command + 'static, CE: 'static + CommandExec
     calibrate_handle.abort();
     bg_cmd_exe_handle.abort();
     info!("all background task stopped");
-}
-
-/// The message sent to the background sync task
-pub(crate) struct SyncMessage<C>
-where
-    C: Command,
-{
-    /// Term number
-    term: TermNum,
-    /// Command
-    cmd: Arc<C>,
-}
-
-impl<C> SyncMessage<C>
-where
-    C: Command,
-{
-    /// Create a new `SyncMessage`
-    pub(crate) fn new(term: TermNum, cmd: Arc<C>) -> Self {
-        Self { term, cmd }
-    }
-
-    /// Get all values from the message
-    fn inner(&mut self) -> (TermNum, Arc<C>) {
-        (self.term, Arc::clone(&self.cmd))
-    }
 }
 
 /// Fetch commands need to be synced and add them to the log
