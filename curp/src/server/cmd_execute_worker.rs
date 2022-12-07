@@ -40,6 +40,7 @@ pub(crate) async fn execute_worker<C: Command + 'static, CE: 'static + CommandEx
                 debug!("cmd {:?} is executed", cmd.id());
                 #[allow(clippy::if_then_some_else_none)] // you can't do await in closure
                 let asr = if er.is_ok() {
+                    debug!("cmd {:?} after sync is called", cmd.id());
                     Some(cmd.after_sync(ce.as_ref(), index).await)
                 } else {
                     None

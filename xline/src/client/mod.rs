@@ -3,8 +3,10 @@ use std::net::SocketAddr;
 // use anyhow::{anyhow, Result};
 use curp::{client::Client as CurpClient, cmd::ProposeId};
 use etcd_client::Client as EtcdClient;
+use kv_types::{PutRequest, RangeRequest};
 use uuid::Uuid;
 
+use self::{errors::ClientError, kv_types::DeleteRangeRequest};
 use crate::{
     rpc::{
         DeleteRangeResponse, PutResponse, RangeResponse, Request, RequestOp, RequestWrapper,
@@ -12,10 +14,6 @@ use crate::{
     },
     server::command::{Command, KeyRange},
 };
-
-use kv_types::{PutRequest, RangeRequest};
-
-use self::{errors::ClientError, kv_types::DeleteRangeRequest};
 
 /// covert struct between etcd and curp
 mod convert;
