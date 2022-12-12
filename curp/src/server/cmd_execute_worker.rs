@@ -11,10 +11,10 @@ use crate::{
 };
 
 /// Number of execute workers
-pub(crate) const N_EXECUTE_WORKERS: usize = 8;
+pub(super) const N_EXECUTE_WORKERS: usize = 8;
 
 /// Worker that execute commands
-pub(crate) async fn execute_worker<C: Command + 'static, CE: 'static + CommandExecutor<C>>(
+pub(super) async fn execute_worker<C: Command + 'static, CE: 'static + CommandExecutor<C>>(
     dispatch_rx: SpmcKeyBasedReceiver<C::K, Option<ExecuteMessage<C>>>,
     ce: Arc<CE>,
 ) {
@@ -56,15 +56,15 @@ pub(crate) async fn execute_worker<C: Command + 'static, CE: 'static + CommandEx
 }
 
 /// Messages sent to the background cmd execution task
-pub(crate) struct ExecuteMessage<C: Command + 'static> {
+pub(super) struct ExecuteMessage<C: Command + 'static> {
     /// The cmd to be executed
-    pub(crate) cmd: Arc<C>,
+    pub(super) cmd: Arc<C>,
     /// Send execution result
     er_tx: ExecuteResultSender<C>,
 }
 
 /// Channel for transferring execution results
-pub(crate) enum ExecuteResultSender<C: Command + 'static> {
+pub(super) enum ExecuteResultSender<C: Command + 'static> {
     /// Only call `execute`
     Execute(oneshot::Sender<Result<C::ER, ExecuteError>>),
     /// Only call `after_sync`
@@ -81,7 +81,7 @@ pub(crate) enum ExecuteResultSender<C: Command + 'static> {
 }
 
 /// Send cmd to background execute cmd task
-pub(crate) struct CmdExecuteSender<C: Command + 'static>(mpsc::UnboundedSender<ExecuteMessage<C>>);
+pub(super) struct CmdExecuteSender<C: Command + 'static>(mpsc::UnboundedSender<ExecuteMessage<C>>);
 
 impl<C: Command + 'static> Clone for CmdExecuteSender<C> {
     fn clone(&self) -> Self {
@@ -91,7 +91,7 @@ impl<C: Command + 'static> Clone for CmdExecuteSender<C> {
 
 impl<C: Command + 'static> CmdExecuteSender<C> {
     /// Send cmd to background cmd executor and return a oneshot receiver for the execution result
-    pub(crate) fn send_exe(&self, cmd: Arc<C>) -> oneshot::Receiver<Result<C::ER, ExecuteError>> {
+    pub(super) fn send_exe(&self, cmd: Arc<C>) -> oneshot::Receiver<Result<C::ER, ExecuteError>> {
         let (tx, rx) = oneshot::channel();
         if let Err(e) = self.0.send(ExecuteMessage {
             cmd,
@@ -103,7 +103,7 @@ impl<C: Command + 'static> CmdExecuteSender<C> {
     }
 
     /// Send cmd to background cmd executor and return a oneshot receiver for the execution result
-    pub(crate) fn send_after_sync(
+    pub(super) fn send_after_sync(
         &self,
         cmd: Arc<C>,
         index: LogIndex,
@@ -120,7 +120,7 @@ impl<C: Command + 'static> CmdExecuteSender<C> {
 
     /// Send cmd to background cmd executor and return a oneshot receiver for the execution result
     #[allow(clippy::type_complexity)] // though complex, it's quite clear
-    pub(crate) fn send_exe_and_after_sync(
+    pub(super) fn send_exe_and_after_sync(
         &self,
         cmd: Arc<C>,
         index: LogIndex,
@@ -140,7 +140,7 @@ impl<C: Command + 'static> CmdExecuteSender<C> {
 }
 
 /// Create a channel to send cmds to background cmd execute workers
-pub(crate) fn cmd_execute_channel<C: Command + 'static>() -> (
+pub(super) fn cmd_execute_channel<C: Command + 'static>() -> (
     CmdExecuteSender<C>,
     mpsc::UnboundedReceiver<ExecuteMessage<C>>,
 ) {
