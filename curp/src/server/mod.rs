@@ -60,7 +60,7 @@ mod gc;
 mod tests;
 
 /// Default server serving port
-pub(crate) static DEFAULT_SERVER_PORT: u16 = 12345;
+static DEFAULT_SERVER_PORT: u16 = 12345;
 
 /// The Rpc Server to handle rpc requests
 /// This Wrapper is introduced due to the `MadSim` rpc lib
@@ -203,7 +203,7 @@ pub struct Protocol<C: Command + 'static> {
 }
 
 /// The message sent to the background sync task
-pub(crate) struct SyncMessage<C>
+struct SyncMessage<C>
 where
     C: Command,
 {
@@ -218,7 +218,7 @@ where
     C: Command,
 {
     /// Create a new `SyncMessage`
-    pub(crate) fn new(term: TermNum, cmd: Arc<C>) -> Self {
+    fn new(term: TermNum, cmd: Arc<C>) -> Self {
         Self { term, cmd }
     }
 
@@ -244,7 +244,7 @@ impl<C: Command> Debug for Protocol<C> {
 
 /// The server role same as Raft
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum ServerRole {
+enum ServerRole {
     /// A follower
     Follower,
     /// A candidate
