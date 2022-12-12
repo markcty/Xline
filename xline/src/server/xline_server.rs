@@ -24,6 +24,9 @@ use crate::{
 /// Rpc Server of curp protocol
 type CurpServer = Rpc<Command>;
 
+/// Curp protocol builder
+type CurpServerBuilder = curp::ServerConfig;
+
 /// Xline server
 #[allow(dead_code)] // Remove this after feature is completed
 #[derive(Debug)]
@@ -133,13 +136,15 @@ impl XlineServer {
                 self.name.clone(),
             ),
             WatchServer::new(self.storage.kv_watcher()),
-            CurpServer::new(
+            CurpServerBuilder::new(
                 self.self_addr.to_string(),
-                self.is_leader,
                 self.peers
                     .iter()
                     .map(|peer| (peer.to_string(), peer.to_string()))
                     .collect(),
+            )
+            .build(
+                self.is_leader,
                 CommandExecutor::new(Arc::clone(&self.storage)),
             ),
         )

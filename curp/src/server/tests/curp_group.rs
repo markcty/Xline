@@ -23,7 +23,7 @@ use crate::{
         Protocol, Rpc,
     },
     util::RwLockMap,
-    LogIndex, ProtocolServer,
+    LogIndex, ProtocolServer, ServerConfig,
 };
 
 struct CurpNode {
@@ -80,10 +80,9 @@ impl CurpGroup {
 
                 let rpc = Rpc {
                     inner: Arc::new(Protocol::new_test(
-                        id.clone(),
-                        false,
-                        others.into_iter().collect(),
+                        ServerConfig::new(id.clone(), others.into_iter().collect()),
                         ce,
+                        false,
                         Arc::clone(&switch),
                     )),
                 };
@@ -110,7 +109,7 @@ impl CurpGroup {
             })
             .collect();
 
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(2000)).await;
         Self { nodes }
     }
 
@@ -119,8 +118,8 @@ impl CurpGroup {
         let mut term = 0;
         for node in self.nodes.values() {
             let state = node.state.read();
-            if term < state.term {
-                term = state.term;
+            if term < state.term() {
+                term = state.term();
             }
         }
         term
@@ -131,11 +130,11 @@ impl CurpGroup {
         let mut term = 0;
         for node in self.nodes.values() {
             let state = node.state.read();
-            if state.term > term {
-                term = state.term;
+            if state.term() > term {
+                term = state.term();
                 leader_id = None;
             }
-            if state.is_leader() && state.term >= term {
+            if state.is_leader() && state.term() >= term {
                 assert!(
                     leader_id.is_none(),
                     "there should be only 1 leader in a term, now there are two: {} {}",
@@ -152,7 +151,7 @@ impl CurpGroup {
     pub(super) fn get_term_checked(&self) -> TermNum {
         let mut term = None;
         for node in self.nodes.values() {
-            let node_term = node.state.map_read(|state| state.term);
+            let node_term = node.state.map_read(|state| state.term());
             if let Some(term) = term {
                 assert_eq!(term, node_term);
             } else {
@@ -167,8 +166,8 @@ impl CurpGroup {
         for node in self.nodes.values() {
             let state = node.state.read();
             if state.is_leader() {
-                if state.term > term {
-                    term = state.term;
+                if state.term() > term {
+                    term = state.term();
                 }
             }
         }

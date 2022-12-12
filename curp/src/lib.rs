@@ -117,6 +117,7 @@ pub mod client;
 
 /// Server side, handling request and sync requests to the log
 pub mod server;
+pub use server::config::Config as ServerConfig;
 
 /// Error types
 pub mod error;

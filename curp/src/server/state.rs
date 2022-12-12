@@ -5,24 +5,23 @@ use parking_lot::{Mutex, RwLock};
 use tokio::time::Instant;
 use tracing::debug;
 
+use super::{cmd_board::CommandBoard, config::Config, ServerRole};
 use crate::{
     cmd::Command,
     log::LogEntry,
     message::{ServerId, TermNum},
 };
 
-use super::{cmd_board::CommandBoard, ServerRole};
-
 /// State of the server
 pub(super) struct State<C: Command + 'static> {
-    /// Id of the server
-    id: ServerId,
-    /// Id of the leader. None if in election state.
-    pub(super) leader_id: Option<ServerId>,
+    /// Config
+    config: Config,
     /// Role of the server
     role: ServerRole,
     /// Current term
-    pub(super) term: TermNum,
+    term: TermNum,
+    /// Id of the leader. None if in election state.
+    pub(super) leader_id: Option<ServerId>,
     /// Consensus log
     pub(super) log: Vec<LogEntry<C>>,
     /// Candidate id that received vote in current term
@@ -38,8 +37,6 @@ pub(super) struct State<C: Command + 'static> {
     pub(super) next_index: HashMap<ServerId, usize>,
     /// For each server, index of highest log entry known to be replicated on server
     pub(super) match_index: HashMap<ServerId, usize>,
-    /// Other server ids and addresses
-    pub(super) others: HashMap<ServerId, String>,
     /// Trigger when server role changes
     pub(super) role_trigger: Arc<Event>,
     /// Trigger when there might be some logs to commit
@@ -56,20 +53,19 @@ pub(super) struct State<C: Command + 'static> {
 impl<C: Command + 'static> State<C> {
     /// Init server state
     pub(super) fn new(
-        id: ServerId,
+        config: Config,
         role: ServerRole,
-        others: HashMap<ServerId, String>,
         cmd_board: Arc<Mutex<CommandBoard>>,
         last_rpc_time: Arc<RwLock<Instant>>,
     ) -> Self {
         let mut next_index = HashMap::new();
         let mut match_index = HashMap::new();
-        for other in others.keys() {
+        for other in config.others().keys() {
             assert!(next_index.insert(other.clone(), 1).is_none());
             assert!(match_index.insert(other.clone(), 0).is_none());
         }
         Self {
-            id,
+            config,
             leader_id: None,
             role,
             term: 0,
@@ -80,13 +76,17 @@ impl<C: Command + 'static> State<C> {
             last_applied: 0,
             next_index,
             match_index,
-            others,
             role_trigger: Arc::new(Event::new()),
             commit_trigger: Arc::new(Event::new()),
             calibrate_trigger: Arc::new(Event::new()),
             cmd_board,
             last_rpc_time,
         }
+    }
+
+    /// Get term
+    pub(super) fn term(&self) -> TermNum {
+        self.term
     }
 
     /// Is leader?
@@ -146,9 +146,14 @@ impl<C: Command + 'static> State<C> {
         Arc::clone(&self.commit_trigger)
     }
 
+    /// Get calibrate trigger
+    pub(super) fn calibrate_trigger(&self) -> Arc<Event> {
+        Arc::clone(&self.calibrate_trigger)
+    }
+
     /// Get id
     pub(super) fn id(&self) -> &ServerId {
-        &self.id
+        self.config.id()
     }
 
     /// Get `last_rpc_time`
@@ -159,5 +164,15 @@ impl<C: Command + 'static> State<C> {
     /// Get `cmd_board`
     pub(super) fn cmd_board(&self) -> Arc<Mutex<CommandBoard>> {
         Arc::clone(&self.cmd_board)
+    }
+
+    /// Get others
+    pub(super) fn others(&self) -> &HashMap<ServerId, String> {
+        self.config.others()
+    }
+
+    /// Get config
+    pub(super) fn config(&self) -> &Config {
+        &self.config
     }
 }

@@ -2,7 +2,6 @@
 use std::sync::atomic::AtomicBool;
 use std::{
     cmp::{min, Ordering},
-    collections::HashMap,
     fmt::Debug,
     sync::Arc,
 };
@@ -18,6 +17,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use self::{
     cmd_board::{CmdState, CommandBoard},
+    config::Config,
     gc::run_gc_tasks,
     spec_pool::SpeculativePool,
     state::State,
@@ -26,7 +26,7 @@ use crate::{
     channel::key_mpsc::{self, MpscKeyBasedSender},
     cmd::{Command, CommandExecutor},
     error::{ProposeError, ServerError},
-    message::{ServerId, TermNum},
+    message::TermNum,
     rpc::{
         AppendEntriesRequest, AppendEntriesResponse, FetchLeaderRequest, FetchLeaderResponse,
         ProposeRequest, ProposeResponse, ProtocolServer, SyncError, VoteRequest, VoteResponse,
@@ -54,6 +54,9 @@ mod spec_pool;
 
 /// Background garbage collection for Curp server
 mod gc;
+
+/// Config
+pub mod config;
 
 #[cfg(test)]
 mod tests;
@@ -117,15 +120,13 @@ impl<C: 'static + Command> crate::rpc::Protocol for Rpc<C> {
 
 impl<C: Command + 'static> Rpc<C> {
     /// New `Rpc`
-    #[inline]
-    pub fn new<CE: CommandExecutor<C> + 'static>(
-        id: ServerId,
+    fn new<CE: CommandExecutor<C> + 'static>(
+        config: Config,
         is_leader: bool,
-        others: HashMap<ServerId, String>,
         executor: CE,
     ) -> Self {
         Self {
-            inner: Arc::new(Protocol::new(id, is_leader, others, executor)),
+            inner: Arc::new(Protocol::new(config, executor, is_leader)),
         }
     }
 
@@ -136,20 +137,16 @@ impl<C: Command + 'static> Rpc<C> {
     ///   `ServerError::RpcError` if any rpc related error met
     #[inline]
     pub async fn run<CE: CommandExecutor<C> + 'static>(
-        id: ServerId,
-        is_leader: bool, // TODO: remove this option
-        others: HashMap<ServerId, String>,
+        self,
         server_port: Option<u16>,
-        executor: CE,
     ) -> Result<(), ServerError> {
         let port = server_port.unwrap_or(DEFAULT_SERVER_PORT);
+        let id = self.inner.state.read().config().id().clone();
         info!("RPC server {id} started, listening on port {port}");
-        let server = Self::new(id, is_leader, others, executor);
-
         tonic::transport::Server::builder()
-            .add_service(ProtocolServer::new(server))
+            .add_service(ProtocolServer::new(self))
             .serve(
-                format!("0.0.0.0:{}", port)
+                format!("0.0.0.0:{}", DEFAULT_SERVER_PORT)
                     .parse()
                     .map_err(|e| ServerError::ParsingError(format!("{}", e)))?,
             )
@@ -164,17 +161,11 @@ impl<C: Command + 'static> Rpc<C> {
     ///   `ServerError::RpcError` if any rpc related error met
     #[inline]
     pub async fn run_from_listener<CE: CommandExecutor<C> + 'static>(
-        id: ServerId,
-        is_leader: bool,
-        others: HashMap<ServerId, String>,
+        self,
         listener: TcpListener,
-        executor: CE,
     ) -> Result<(), ServerError> {
-        let server = Self {
-            inner: Arc::new(Protocol::new(id, is_leader, others, executor)),
-        };
         tonic::transport::Server::builder()
-            .add_service(ProtocolServer::new(server))
+            .add_service(ProtocolServer::new(self))
             .serve_with_incoming(TcpListenerStream::new(listener))
             .await?;
         Ok(())
@@ -233,7 +224,7 @@ impl<C: Command> Debug for Protocol<C> {
         self.state.map_read(|state| {
             f.debug_struct("Server")
                 .field("role", &state.role())
-                .field("term", &state.term)
+                .field("term", &state.term())
                 .field("spec", &self.spec)
                 .field("log", &state.log)
                 .finish()
@@ -254,13 +245,10 @@ enum ServerRole {
 
 impl<C: 'static + Command> Protocol<C> {
     /// Create a new server instance
-    #[must_use]
-    #[inline]
     pub fn new<CE: CommandExecutor<C> + 'static>(
-        id: ServerId,
-        is_leader: bool,
-        others: HashMap<ServerId, String>,
+        config: Config,
         cmd_executor: CE,
+        is_leader: bool,
     ) -> Self {
         let (sync_tx, sync_rx) = key_mpsc::channel();
         let cmd_board = Arc::new(Mutex::new(CommandBoard::new()));
@@ -270,13 +258,12 @@ impl<C: 'static + Command> Protocol<C> {
         let (exe_tx, exe_rx) = cmd_execute_channel();
 
         let state = Arc::new(RwLock::new(State::new(
-            id,
+            config,
             if is_leader {
                 ServerRole::Leader
             } else {
                 ServerRole::Follower
             },
-            others,
             Arc::clone(&cmd_board),
             Arc::clone(&last_rpc_time),
         )));
@@ -308,11 +295,10 @@ impl<C: 'static + Command> Protocol<C> {
     }
 
     #[cfg(test)]
-    pub fn new_test<CE: CommandExecutor<C> + 'static>(
-        id: ServerId,
-        is_leader: bool,
-        others: HashMap<ServerId, String>,
+    pub(crate) fn new_test<CE: CommandExecutor<C> + 'static>(
+        config: Config,
         cmd_executor: CE,
+        is_leader: bool,
         reachable: Arc<AtomicBool>,
     ) -> Self {
         let (sync_tx, sync_rx) = key_mpsc::channel();
@@ -323,13 +309,12 @@ impl<C: 'static + Command> Protocol<C> {
         let (exe_tx, exe_rx) = cmd_execute_channel();
 
         let state = Arc::new(RwLock::new(State::new(
-            id,
+            config,
             if is_leader {
                 ServerRole::Leader
             } else {
                 ServerRole::Follower
             },
-            others,
             Arc::clone(&cmd_board),
             Arc::clone(&last_rpc_time),
         )));
@@ -393,7 +378,9 @@ impl<C: 'static + Command> Protocol<C> {
         })?;
 
         (|| async {
-            let (is_leader, term) = self.state.map_read(|state| (state.is_leader(), state.term));
+            let (is_leader, term) = self
+                .state
+                .map_read(|state| (state.is_leader(), state.term()));
             let er_rx = {
                 let mut spec = self.spec.lock();
 
@@ -479,7 +466,7 @@ impl<C: 'static + Command> Protocol<C> {
                 if !state.is_leader() {
                     return WaitSyncedResponse::new_error(&SyncError::Redirect(
                         state.leader_id.clone(),
-                        state.term,
+                        state.term(),
                     ))
                     .map_or_else(
                         |err| {
@@ -534,15 +521,15 @@ impl<C: 'static + Command> Protocol<C> {
         let state = self.state.upgradable_read();
 
         // calibrate term
-        if req.term < state.term {
+        if req.term < state.term() {
             return Ok(tonic::Response::new(AppendEntriesResponse::new_reject(
-                state.term,
+                state.term(),
                 state.commit_index,
             )));
         }
 
         let mut state = RwLockUpgradableReadGuard::upgrade(state);
-        if req.term > state.term {
+        if req.term > state.term() {
             state.update_to_term(req.term);
         }
         if state.leader_id.is_none() {
@@ -562,7 +549,7 @@ impl<C: 'static + Command> Protocol<C> {
             .map_or(false, |entry| entry.term() != req.prev_log_term)
         {
             return Ok(tonic::Response::new(AppendEntriesResponse::new_reject(
-                state.term,
+                state.term(),
                 state.commit_index,
             )));
         }
@@ -582,7 +569,7 @@ impl<C: 'static + Command> Protocol<C> {
         }
 
         Ok(tonic::Response::new(AppendEntriesResponse::new_accept(
-            state.term,
+            state.term(),
         )))
     }
 
@@ -602,9 +589,9 @@ impl<C: 'static + Command> Protocol<C> {
         let mut state = self.state.write();
 
         // calibrate term
-        match req.term.cmp(&state.term) {
+        match req.term.cmp(&state.term()) {
             Ordering::Less => {
-                return Ok(tonic::Response::new(VoteResponse::new_reject(state.term)));
+                return Ok(tonic::Response::new(VoteResponse::new_reject(state.term())));
             }
             Ordering::Equal => {}
             Ordering::Greater => {
@@ -614,7 +601,7 @@ impl<C: 'static + Command> Protocol<C> {
 
         if let Some(id) = state.voted_for.as_ref() {
             if id != &req.candidate_id {
-                return Ok(tonic::Response::new(VoteResponse::new_reject(state.term)));
+                return Ok(tonic::Response::new(VoteResponse::new_reject(state.term())));
             }
         }
 
@@ -629,9 +616,9 @@ impl<C: 'static + Command> Protocol<C> {
         {
             debug!("vote for server {}", req.candidate_id);
             state.voted_for = Some(req.candidate_id);
-            Ok(tonic::Response::new(VoteResponse::new_accept(state.term)))
+            Ok(tonic::Response::new(VoteResponse::new_accept(state.term())))
         } else {
-            Ok(tonic::Response::new(VoteResponse::new_reject(state.term)))
+            Ok(tonic::Response::new(VoteResponse::new_reject(state.term())))
         }
     }
 
@@ -643,7 +630,7 @@ impl<C: 'static + Command> Protocol<C> {
     ) -> Result<tonic::Response<FetchLeaderResponse>, tonic::Status> {
         let state = self.state.read();
         let leader_id = state.leader_id.clone();
-        let term = state.term;
+        let term = state.term();
         Ok(tonic::Response::new(FetchLeaderResponse::new(
             leader_id, term,
         )))
