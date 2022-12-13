@@ -1,10 +1,13 @@
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, warn};
+use tokio::sync::oneshot;
+use tracing::{debug, error, warn};
 
 use crate::{
-    channel::key_spmc::SpmcKeyBasedReceiver,
+    channel::{
+        key_mpmc,
+        key_mpmc::{MpmcKeyBasedReceiver, MpmcKeyBasedSender},
+    },
     cmd::{Command, CommandExecutor},
     error::ExecuteError,
     LogIndex,
@@ -15,7 +18,7 @@ pub(crate) const N_EXECUTE_WORKERS: usize = 8;
 
 /// Worker that execute commands
 pub(crate) async fn execute_worker<C: Command + 'static, CE: 'static + CommandExecutor<C>>(
-    dispatch_rx: SpmcKeyBasedReceiver<C::K, Option<ExecuteMessage<C>>>,
+    dispatch_rx: MpmcKeyBasedReceiver<C::K, Option<ExecuteMessage<C>>>,
     ce: Arc<CE>,
 ) {
     while let Ok((msg_wrapped, done)) = dispatch_rx.recv().await {
@@ -52,6 +55,7 @@ pub(crate) async fn execute_worker<C: Command + 'static, CE: 'static + CommandEx
             warn!("{e}");
         }
     }
+    error!("bg execute cmd stopped unexpectedly");
 }
 
 /// Messages sent to the background cmd execution task
@@ -80,7 +84,9 @@ pub(crate) enum ExecuteResultSender<C: Command + 'static> {
 }
 
 /// Send cmd to background execute cmd task
-pub(crate) struct CmdExecuteSender<C: Command + 'static>(mpsc::UnboundedSender<ExecuteMessage<C>>);
+pub(crate) struct CmdExecuteSender<C: Command + 'static>(
+    MpmcKeyBasedSender<C::K, Option<ExecuteMessage<C>>>,
+);
 
 impl<C: Command + 'static> Clone for CmdExecuteSender<C> {
     fn clone(&self) -> Self {
@@ -92,10 +98,14 @@ impl<C: Command + 'static> CmdExecuteSender<C> {
     /// Send cmd to background cmd executor and return a oneshot receiver for the execution result
     pub(crate) fn send_exe(&self, cmd: Arc<C>) -> oneshot::Receiver<Result<C::ER, ExecuteError>> {
         let (tx, rx) = oneshot::channel();
-        if let Err(e) = self.0.send(ExecuteMessage {
-            cmd,
-            er_tx: ExecuteResultSender::Execute(tx),
-        }) {
+        let cmd_cloned = Arc::clone(&cmd);
+        if let Err(e) = self.0.send(
+            cmd_cloned.keys(),
+            Some(ExecuteMessage {
+                cmd,
+                er_tx: ExecuteResultSender::Execute(tx),
+            }),
+        ) {
             warn!("failed to send cmd to background execute cmd task, {e}");
         }
         rx
@@ -108,10 +118,14 @@ impl<C: Command + 'static> CmdExecuteSender<C> {
         index: LogIndex,
     ) -> oneshot::Receiver<Result<C::ASR, ExecuteError>> {
         let (tx, rx) = oneshot::channel();
-        if let Err(e) = self.0.send(ExecuteMessage {
-            cmd,
-            er_tx: ExecuteResultSender::AfterSync(tx, index),
-        }) {
+        let cmd_cloned = Arc::clone(&cmd);
+        if let Err(e) = self.0.send(
+            cmd_cloned.keys(),
+            Some(ExecuteMessage {
+                cmd,
+                er_tx: ExecuteResultSender::AfterSync(tx, index),
+            }),
+        ) {
             warn!("failed to send cmd to background execute cmd task, {e}");
         }
         rx
@@ -128,10 +142,14 @@ impl<C: Command + 'static> CmdExecuteSender<C> {
         Option<Result<C::ASR, ExecuteError>>,
     )> {
         let (tx, rx) = oneshot::channel();
-        if let Err(e) = self.0.send(ExecuteMessage {
-            cmd,
-            er_tx: ExecuteResultSender::ExecuteAndAfterSync(tx, index),
-        }) {
+        let cmd_cloned = Arc::clone(&cmd);
+        if let Err(e) = self.0.send(
+            cmd_cloned.keys(),
+            Some(ExecuteMessage {
+                cmd,
+                er_tx: ExecuteResultSender::ExecuteAndAfterSync(tx, index),
+            }),
+        ) {
             warn!("failed to send cmd to background execute cmd task, {e}");
         }
         rx
@@ -141,8 +159,8 @@ impl<C: Command + 'static> CmdExecuteSender<C> {
 /// Create a channel to send cmds to background cmd execute workers
 pub(crate) fn cmd_execute_channel<C: Command + 'static>() -> (
     CmdExecuteSender<C>,
-    mpsc::UnboundedReceiver<ExecuteMessage<C>>,
+    MpmcKeyBasedReceiver<C::K, Option<ExecuteMessage<C>>>,
 ) {
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx) = key_mpmc::channel();
     (CmdExecuteSender(tx), rx)
 }

@@ -11,8 +11,8 @@ use thiserror::Error;
 
 use crate::cmd::ConflictCheck;
 
+pub(crate) mod key_mpmc;
 pub(crate) mod key_mpsc;
-pub(crate) mod key_spmc;
 
 /// If two key sets conflict with each other
 fn keys_conflict<K: ConflictCheck>(ks1: &[K], ks2: &[K]) -> bool {

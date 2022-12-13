@@ -8,7 +8,7 @@ use tokio::{sync::mpsc, time::Instant};
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    channel::{key_mpsc::MpscKeyBasedReceiver, key_spmc, RecvError},
+    channel::{key_mpmc::MpmcKeyBasedReceiver, key_mpsc::MpscKeyBasedReceiver, RecvError},
     cmd::{Command, CommandExecutor},
     cmd_board::{CmdState, CommandBoard},
     cmd_execute_worker::{execute_worker, CmdExecuteSender, ExecuteMessage, N_EXECUTE_WORKERS},
@@ -30,7 +30,7 @@ pub(crate) async fn run_bg_tasks<C: Command + 'static, CE: 'static + CommandExec
     cmd_executor: CE,
     spec: Arc<Mutex<SpeculativePool<C>>>,
     cmd_exe_tx: CmdExecuteSender<C>,
-    cmd_exe_rx: mpsc::UnboundedReceiver<ExecuteMessage<C>>,
+    cmd_exe_rx: MpmcKeyBasedReceiver<C::K, Option<ExecuteMessage<C>>>,
     cmd_board: Arc<Mutex<CommandBoard>>,
     mut shutdown: Shutdown,
 ) {
@@ -672,25 +672,12 @@ async fn leader_calibrates_followers<C: Command + 'static>(
 /// The only place where cmds get executed and call `after_sync`
 async fn bg_execute_cmd<C: Command + 'static, CE: 'static + CommandExecutor<C>>(
     ce: CE,
-    mut cmd_rx: mpsc::UnboundedReceiver<ExecuteMessage<C>>,
+    cmd_rx: MpmcKeyBasedReceiver<C::K, Option<ExecuteMessage<C>>>,
 ) {
-    // TODO: use KeyBasedMpsc to dispatch cmds to execute in parallel
-    let (dispatch_tx, dispatch_rx) = key_spmc::channel();
-
-    #[allow(clippy::shadow_unrelated)] // clippy false positive
     // spawn cmd executor worker
-    iter::repeat((dispatch_rx, Arc::new(ce)))
+    iter::repeat((cmd_rx, Arc::new(ce)))
         .take(N_EXECUTE_WORKERS)
         .for_each(|(rx, ce)| {
             let _worker_handle = tokio::spawn(execute_worker(rx, ce));
         });
-
-    // TODO: avoid re-dispatch by using a mpmc channel
-    while let Some(msg) = cmd_rx.recv().await {
-        let cmd = Arc::clone(&msg.cmd);
-        if let Err(e) = dispatch_tx.send(cmd.keys(), Some(msg)) {
-            warn!("failed to send cmd to execute worker, {e}");
-        }
-    }
-    error!("bg execute cmd stopped unexpectedly");
 }
