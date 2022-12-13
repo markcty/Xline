@@ -3,6 +3,7 @@ use std::sync::atomic::AtomicBool;
 use std::{iter, ops::Range, sync::Arc, time::Duration};
 
 use clippy_utilities::NumericCast;
+use event_listener::Event;
 use futures::future::Either;
 use madsim::rand::{thread_rng, Rng};
 use parking_lot::{lock_api::RwLockUpgradableReadGuard, Mutex, RwLock};
@@ -52,17 +53,25 @@ pub(super) async fn run_bg_tasks<C: Command + 'static, CE: 'static + CommandExec
     )
     .await;
 
+    // when append entries are sent, we can reset heartbeat timeout
+    let hb_reset_trigger = Arc::new(Event::new());
+
     // notify when a broadcast of append_entries is needed immediately
     let (ae_trigger, ae_trigger_rx) = mpsc::unbounded_channel::<usize>();
 
     let bg_ae_handle = tokio::spawn(bg_append_entries(
         connects.clone(),
         Arc::clone(&state),
+        Arc::clone(&hb_reset_trigger),
         ae_trigger_rx,
     ));
     let bg_election_handle = tokio::spawn(bg_election(connects.clone(), Arc::clone(&state)));
     let bg_apply_handle = tokio::spawn(bg_apply(Arc::clone(&state), cmd_exe_tx, spec));
-    let bg_heartbeat_handle = tokio::spawn(bg_heartbeat(connects.clone(), Arc::clone(&state)));
+    let bg_heartbeat_handle = tokio::spawn(bg_heartbeat(
+        connects.clone(),
+        Arc::clone(&state),
+        hb_reset_trigger,
+    ));
     let bg_get_sync_cmds_handle =
         tokio::spawn(bg_get_sync_cmds(Arc::clone(&state), sync_chan, ae_trigger));
     let calibrate_handle = tokio::spawn(leader_calibrates_followers(connects, state));
@@ -149,6 +158,7 @@ const RPC_TIMEOUT: Duration = Duration::from_millis(50);
 async fn bg_append_entries<C: Command + 'static>(
     connects: Vec<Arc<Connect>>,
     state: Arc<RwLock<State<C>>>,
+    hb_reset_trigger: Arc<Event>,
     mut ae_trigger_rx: mpsc::UnboundedReceiver<usize>,
 ) {
     while let Some(i) = ae_trigger_rx.recv().await {
@@ -186,6 +196,8 @@ async fn bg_append_entries<C: Command + 'static>(
                 Arc::clone(&state),
             ));
         }
+
+        hb_reset_trigger.notify(1);
     }
 }
 
@@ -256,16 +268,22 @@ async fn send_log_until_succeed<C: Command + 'static>(
 async fn bg_heartbeat<C: Command + 'static>(
     connects: Vec<Arc<Connect>>,
     state: Arc<RwLock<State<C>>>,
+    hb_reset_trigger: Arc<Event>,
 ) {
     let role_trigger = state.read().role_trigger();
     #[allow(clippy::integer_arithmetic)] // tokio internal triggered
     loop {
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(HEARTBEAT_INTERVAL) => break,
+                _ = hb_reset_trigger.listen() => {}
+            }
+        }
+
         // only leader should run this task
         while !state.read().is_leader() {
             role_trigger.listen().await;
         }
-
-        tokio::time::sleep(HEARTBEAT_INTERVAL).await;
 
         // send append_entries to each server in parallel
         for connect in &connects {

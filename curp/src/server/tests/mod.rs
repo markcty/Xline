@@ -253,3 +253,29 @@ async fn fast_round_is_slower_than_slow_round() {
         .into_inner();
     assert!(resp.exe_result.is_none());
 }
+
+// Ensures heartbeats are optimized out when contention is high
+#[traced_test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 10)]
+async fn no_hb_when_contention_is_high() {
+    let group = CurpGroup::new(3).await;
+    let client = group.new_client().await;
+    for i in 0..50 {
+        let cmd = TestCommand::new_put(i, vec![i], i);
+        assert!(client.propose(cmd).await.is_ok());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    drop(group);
+
+    logs_assert(|lines| {
+        let hb_count = lines
+            .iter()
+            .filter(|line| line.contains("heartbeat sent to"))
+            .count();
+        if hb_count <= 6 {
+            Ok(())
+        } else {
+            Err(format!("Expected only 4 heartbeats, found {hb_count}"))
+        }
+    });
+}
