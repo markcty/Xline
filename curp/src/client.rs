@@ -292,9 +292,11 @@ where
 
             // wait until the election is completed
             // TODO: let user configure it according to average leader election cost
-            tokio::time::sleep(Duration::from_micros(500)).await;
+            tokio::time::sleep(Self::RETRY_INTERVAL).await;
         }
     }
+
+    const RETRY_INTERVAL: Duration = Duration::from_micros(500);
 
     /// Propose the request to servers
     /// # Errors
