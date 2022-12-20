@@ -9,6 +9,7 @@ use event_listener::Event;
 use futures::{pin_mut, stream::FuturesUnordered, StreamExt};
 use opentelemetry::global;
 use parking_lot::RwLock;
+use tokio::time::timeout;
 use tracing::{debug, info_span, instrument, warn, Instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -207,7 +208,10 @@ where
                 if let Some(id) = self.state.read().leader.clone() {
                     break id;
                 }
-                notify.listen().await;
+                if timeout(Self::TIMEOUT, notify.listen()).await.is_err() {
+                    // maybe the fast path fails to set the leader, need to fetch leader proactively
+                    self.fetch_leader().await;
+                }
             };
 
             debug!("wait synced request sent to {}", leader_id);
