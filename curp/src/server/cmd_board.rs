@@ -1,16 +1,16 @@
 use std::collections::HashMap;
 
 use event_listener::Event;
+use indexmap::IndexMap;
 
 use crate::{cmd::ProposeId, rpc::WaitSyncedResponse};
 
 /// Command board is a buffer to store command execution result for `wait_synced` requests
-// TODO: GC
 pub(super) struct CommandBoard {
     /// Stores all notifiers for wait_synced requests
     pub(super) notifiers: HashMap<ProposeId, Event>,
     /// Stores all command states
-    pub(super) cmd_states: HashMap<ProposeId, CmdState>,
+    pub(super) cmd_states: IndexMap<ProposeId, CmdState>,
 }
 
 impl CommandBoard {
@@ -18,7 +18,7 @@ impl CommandBoard {
     pub(super) fn new() -> Self {
         Self {
             notifiers: HashMap::new(),
-            cmd_states: HashMap::new(),
+            cmd_states: IndexMap::new(),
         }
     }
 
