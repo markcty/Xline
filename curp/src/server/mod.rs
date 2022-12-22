@@ -5,6 +5,7 @@ use std::{
     collections::HashMap,
     fmt::Debug,
     sync::Arc,
+    time::Duration,
 };
 
 use clippy_utilities::NumericCast;
@@ -12,7 +13,11 @@ use event_listener::Event;
 use lock_utils::parking_lot_lock::RwLockMap;
 use opentelemetry::global;
 use parking_lot::{lock_api::RwLockUpgradableReadGuard, Mutex, RwLock};
-use tokio::{net::TcpListener, sync::broadcast, time::Instant};
+use tokio::{
+    net::TcpListener,
+    sync::broadcast,
+    time::{timeout, Instant},
+};
 use tokio_stream::wrappers::TcpListenerStream;
 use tracing::{debug, error, info, instrument, Span};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -465,6 +470,9 @@ impl<C: 'static + Command> Protocol<C> {
         )
     }
 
+    /// Wait synced request timeout
+    const WAIT_SYNCED_TIMEOUT: Duration = Duration::from_secs(5);
+
     /// handle "wait synced" request
     async fn wait_synced(
         &self,
@@ -522,7 +530,12 @@ impl<C: 'static + Command> Protocol<C> {
                     .or_insert_with(Event::new)
                     .listen()
             };
-            listener.await;
+            if timeout(Self::WAIT_SYNCED_TIMEOUT, listener).await.is_err() {
+                let _ignored = self.cmd_board.lock().notifiers.remove(&id);
+                break WaitSyncedResponse::new_error(&SyncError::Timeout).map_err(|err| {
+                    tonic::Status::internal(format!("encode or decode error, {}", err))
+                });
+            }
         };
 
         resp.map(tonic::Response::new)
