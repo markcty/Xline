@@ -1,9 +1,6 @@
 on:
   push:
     branches: [ master ]
-  pull_request:
-    types: [ closed ]
-    branches: [ master ]
 
 env:
   CI_RUST_TOOLCHAIN: 1.61.0
