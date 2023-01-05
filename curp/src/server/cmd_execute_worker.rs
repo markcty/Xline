@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::future::OptionFuture;
+use madsim::rand::random;
 #[cfg(test)]
 use mockall::automock;
 use tokio::sync::oneshot;
@@ -23,26 +24,33 @@ pub(super) async fn execute_worker<C: Command + 'static, CE: 'static + CommandEx
     dispatch_rx: CmdExeReceiver<C>,
     ce: Arc<CE>,
 ) {
+    let worker_id: u64 = random();
     while let Ok((ExecuteMessage { cmd, er_tx }, done)) = dispatch_rx.recv().await {
         match er_tx {
             ExeResultSender::Execute(tx) => {
                 let er = cmd.execute(ce.as_ref()).await;
-                debug!("cmd {:?} is executed, {:?}", cmd.id(), cmd);
+                debug!("{worker_id} cmd {:?} is executed, result: {:#?}, ", cmd, er);
                 let _ignore = tx.send(er); // it's ok to ignore the result here because sometimes the result is not needed
             }
             ExeResultSender::AfterSync(tx, index) => {
                 let asr = cmd.after_sync(ce.as_ref(), index).await;
-                debug!("cmd {:?} after sync is called, {:?}", cmd.id(), cmd);
+                debug!(
+                    "{worker_id} cmd {:?} after sync is called, result: {:#?}",
+                    cmd, asr
+                );
                 let _ignore = tx.send(asr); // it's ok to ignore the result here because sometimes the result is not needed
             }
             ExeResultSender::ExecuteAndAfterSync(tx, index) => {
                 let er = cmd.execute(ce.as_ref()).await;
-                debug!("cmd {:?} is executed, {:?}", cmd.id(), cmd);
+                debug!("{worker_id} cmd {:?} is executed, result: {:#?}, ", cmd, er);
                 let asr: OptionFuture<_> = er
                     .is_ok()
                     .then(|| async {
                         let asr = cmd.after_sync(ce.as_ref(), index).await;
-                        debug!("cmd {:?} after sync is called, {:?}", cmd.id(), cmd);
+                        debug!(
+                            "{worker_id} cmd {:?} after sync is called, result: {:#?}",
+                            cmd, asr
+                        );
                         asr
                     })
                     .into();
