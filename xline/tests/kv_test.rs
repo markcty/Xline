@@ -218,7 +218,8 @@ async fn test_kv_delete() -> Result<(), Box<dyn Error>> {
         },
     ];
 
-    for test in tests {
+    for (i, test) in tests.into_iter().enumerate() {
+        tracing::debug!("test {i} begins");
         for key in keys {
             client.put(PutRequest::new(key, "bar")).await?;
         }
@@ -227,9 +228,10 @@ async fn test_kv_delete() -> Result<(), Box<dyn Error>> {
         assert_eq!(res.deleted, test.want_deleted);
 
         let res = client.range(RangeRequest::new("").with_prefix()).await?;
-        for (i, (kv, want)) in res.kvs.iter().zip(test.want_keys.iter()).enumerate() {
-            assert!(kv.key == want.as_bytes(), "fail {i}");
+        for (j, (kv, want)) in res.kvs.iter().zip(test.want_keys.iter()).enumerate() {
+            assert_eq!(kv.key, want.as_bytes(), "fail {j} in test {i}");
         }
+        tracing::debug!("test {i} ends");
     }
 
     Ok(())
