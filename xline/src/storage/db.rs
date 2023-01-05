@@ -10,7 +10,7 @@ use crate::rpc::KeyValue;
 #[derive(Debug)]
 pub(crate) struct DB {
     /// internal storage of `DB`
-    storage: Mutex<HashMap<Revision, KeyValue>>,
+    pub(crate) storage: Mutex<HashMap<Revision, KeyValue>>,
 }
 
 impl DB {

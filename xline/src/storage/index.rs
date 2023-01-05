@@ -10,7 +10,7 @@ use crate::server::command::{KeyRange, RangeType};
 #[derive(Debug)]
 pub(crate) struct Index {
     /// index
-    index: Mutex<BTreeMap<Vec<u8>, Vec<KeyRevision>>>,
+    pub(crate) index: Mutex<BTreeMap<Vec<u8>, Vec<KeyRevision>>>,
 }
 
 impl Index {
