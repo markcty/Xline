@@ -1,7 +1,8 @@
 mod common;
 
-use std::error::Error;
+use std::{error::Error, fs::File};
 
+use tracing_subscriber::EnvFilter;
 use xline::client::kv_types::{
     DeleteRangeRequest, PutRequest, RangeRequest, SortOrder, SortTarget,
 };
@@ -160,6 +161,13 @@ async fn test_kv_get() -> Result<(), Box<dyn Error>> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn test_kv_delete() -> Result<(), Box<dyn Error>> {
+    let path = format!("../scripts/logs/{}.log", std::env::var("ID").unwrap());
+    let file = File::create(path).unwrap();
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .with_ansi(false)
+        .with_writer(file)
+        .init();
     struct TestCase<'a> {
         req: DeleteRangeRequest,
         want_deleted: i64,

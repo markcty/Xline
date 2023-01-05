@@ -1,7 +1,8 @@
 //! Integration test for the curp server
 
-use std::time::Duration;
+use std::{env, fs::File, time::Duration};
 
+use tracing_subscriber::EnvFilter;
 use tracing_test::traced_test;
 
 use crate::common::{curp_group::CurpGroup, test_cmd::TestCommand};
@@ -57,9 +58,15 @@ async fn synced_propose() {
 }
 
 // Each command should be executed once and only once on each node
-#[traced_test]
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn exe_exact_n_times() {
+    let path = format!("../scripts/logs/{}.log", env::var("ID").unwrap());
+    let file = File::create(path).unwrap();
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .with_ansi(false)
+        .with_writer(file)
+        .init();
     let mut group = CurpGroup::new(3).await;
     let client = group.new_client().await;
     let cmd = TestCommand::new_get(0, vec![0]);
