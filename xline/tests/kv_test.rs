@@ -1,6 +1,6 @@
 mod common;
 
-use std::{error::Error, fs::File};
+use std::error::Error;
 
 use tracing_subscriber::EnvFilter;
 use xline::client::kv_types::{
@@ -161,12 +161,9 @@ async fn test_kv_get() -> Result<(), Box<dyn Error>> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn test_kv_delete() -> Result<(), Box<dyn Error>> {
-    let path = format!("../scripts/logs/d-{}.log", std::env::var("ID").unwrap());
-    let file = File::create(path).unwrap();
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .with_ansi(false)
-        .with_writer(file)
         .init();
     struct TestCase<'a> {
         req: DeleteRangeRequest,
@@ -219,7 +216,7 @@ async fn test_kv_delete() -> Result<(), Box<dyn Error>> {
     ];
 
     for (i, test) in tests.into_iter().enumerate() {
-        tracing::debug!("test {i} begins");
+        println!("test {i} begins");
         for key in keys {
             client.put(PutRequest::new(key, "bar")).await?;
         }
@@ -231,7 +228,7 @@ async fn test_kv_delete() -> Result<(), Box<dyn Error>> {
         for (j, (kv, want)) in res.kvs.iter().zip(test.want_keys.iter()).enumerate() {
             assert_eq!(kv.key, want.as_bytes(), "fail {j} in test {i}");
         }
-        tracing::debug!("test {i} ends");
+        println!("test {i} ends");
     }
 
     Ok(())

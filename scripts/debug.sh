@@ -6,7 +6,7 @@ for i in {1..100}; do
   #   echo "fail exact_n round no.$i"
   #   exit 1
   # fi
-  if RUST_LOG="curp" ID="$i" cargo test --package xline --test kv_test -- test_kv_delete --exact --nocapture >/dev/null; then
+  if RUST_LOG="curp" ID="$i" cargo test --package xline --test kv_test -- test_kv_delete --exact --nocapture >"scripts/logs/d-${i}.log"; then
     echo "pass delete round no.$i"
   else
     echo "fail delete round no.$i"
