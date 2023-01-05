@@ -27,22 +27,22 @@ pub(super) async fn execute_worker<C: Command + 'static, CE: 'static + CommandEx
         match er_tx {
             ExeResultSender::Execute(tx) => {
                 let er = cmd.execute(ce.as_ref()).await;
-                debug!("cmd {:?} is executed", cmd.id());
+                debug!("cmd {:?} is executed, {:?}", cmd.id(), cmd);
                 let _ignore = tx.send(er); // it's ok to ignore the result here because sometimes the result is not needed
             }
             ExeResultSender::AfterSync(tx, index) => {
                 let asr = cmd.after_sync(ce.as_ref(), index).await;
-                debug!("cmd {:?} after sync is called", cmd.id());
+                debug!("cmd {:?} after sync is called, {:?}", cmd.id(), cmd);
                 let _ignore = tx.send(asr); // it's ok to ignore the result here because sometimes the result is not needed
             }
             ExeResultSender::ExecuteAndAfterSync(tx, index) => {
                 let er = cmd.execute(ce.as_ref()).await;
-                debug!("cmd {:?} is executed", cmd.id());
+                debug!("cmd {:?} is executed, {:?}", cmd.id(), cmd);
                 let asr: OptionFuture<_> = er
                     .is_ok()
                     .then(|| async {
                         let asr = cmd.after_sync(ce.as_ref(), index).await;
-                        debug!("cmd {:?} after sync is called", cmd.id());
+                        debug!("cmd {:?} after sync is called, {:?}", cmd.id(), cmd);
                         asr
                     })
                     .into();

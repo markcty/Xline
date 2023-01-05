@@ -161,7 +161,7 @@ async fn test_kv_get() -> Result<(), Box<dyn Error>> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn test_kv_delete() -> Result<(), Box<dyn Error>> {
-    let path = format!("../scripts/logs/{}.log", std::env::var("ID").unwrap());
+    let path = format!("../scripts/logs/d-{}.log", std::env::var("ID").unwrap());
     let file = File::create(path).unwrap();
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
@@ -227,12 +227,9 @@ async fn test_kv_delete() -> Result<(), Box<dyn Error>> {
         assert_eq!(res.deleted, test.want_deleted);
 
         let res = client.range(RangeRequest::new("").with_prefix()).await?;
-        let is_identical = res
-            .kvs
-            .iter()
-            .zip(test.want_keys.iter())
-            .all(|(kv, want)| kv.key == want.as_bytes());
-        assert!(is_identical);
+        for (i, (kv, want)) in res.kvs.iter().zip(test.want_keys.iter()).enumerate() {
+            assert!(kv.key == want.as_bytes(), "fail {i}");
+        }
     }
 
     Ok(())

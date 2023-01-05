@@ -60,7 +60,7 @@ async fn synced_propose() {
 // Each command should be executed once and only once on each node
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn exe_exact_n_times() {
-    let path = format!("../scripts/logs/{}.log", env::var("ID").unwrap());
+    let path = format!("../scripts/logs/s-{}.log", env::var("ID").unwrap());
     let file = File::create(path).unwrap();
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
