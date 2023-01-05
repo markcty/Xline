@@ -18,6 +18,7 @@ scripts/*
 !scripts/benchmark.sh
 !scripts/quick_start.sh
 !scripts/coverage.sh
+!scripts/debug.sh
 
 coverage
 *.profraw
