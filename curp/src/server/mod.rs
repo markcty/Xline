@@ -541,13 +541,15 @@ impl<C: 'static + Command> Protocol<C> {
         request: tonic::Request<AppendEntriesRequest>,
     ) -> Result<tonic::Response<AppendEntriesResponse>, tonic::Status> {
         let req = request.into_inner();
-        debug!("append_entries received: term({}), commit({}), prev_log_index({}), prev_log_term({}), {} entries", 
-            req.term, req.leader_commit, req.prev_log_index, req.prev_log_term, req.entries.len());
+
 
         let state = self.state.upgradable_read();
+        debug!("{} append_entries received: term({}), commit({}), prev_log_index({}), prev_log_term({}), {} entries", 
+                state.id(), req.term, req.leader_commit, req.prev_log_index, req.prev_log_term, req.entries.len());
 
         // calibrate term
         if req.term < state.term {
+            debug!("{} return 1", state.id());
             return Ok(tonic::Response::new(AppendEntriesResponse::new_reject(
                 state.term,
                 state.commit_index,
@@ -574,6 +576,7 @@ impl<C: 'static + Command> Protocol<C> {
             .get(req.prev_log_index.numeric_cast::<usize>())
             .map_or(false, |entry| entry.term() != req.prev_log_term)
         {
+            debug!("{} return 2", state.id());
             return Ok(tonic::Response::new(AppendEntriesResponse::new_reject(
                 state.term,
                 state.commit_index,
@@ -585,15 +588,17 @@ impl<C: 'static + Command> Protocol<C> {
             .entries()
             .map_err(|e| tonic::Status::internal(format!("encode or decode error, {}", e)))?;
         state.log.extend(entries.into_iter());
+        debug!("{} log updated, len: {}", state.id(), state.log.len());
 
         // update commit index
         let prev_commit_index = state.commit_index;
         state.commit_index = min(req.leader_commit.numeric_cast(), state.last_log_index());
         if prev_commit_index != state.commit_index {
-            debug!("commit_index updated to {}", state.commit_index);
+            debug!("{} commit_index updated to {}", state.id(), state.commit_index);
             state.commit_trigger.notify(1);
         }
 
+        debug!("{} return 3", state.id());
         Ok(tonic::Response::new(AppendEntriesResponse::new_accept(
             state.term,
         )))
