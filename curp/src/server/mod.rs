@@ -563,6 +563,17 @@ impl<C: 'static + Command> Protocol<C> {
 
         *self.last_rpc_time.write() = Instant::now();
 
+        let mut entries = req
+            .entries()
+            .map_err(|e| tonic::Status::internal(format!("encode or decode error, {}", e)))?;
+
+        // if the request is a heartbeat(heartbeat requests' entries are empty), don't modify state log
+        if entries.is_empty() {
+            return Ok(tonic::Response::new(AppendEntriesResponse::new_accept(
+                state.term,
+            )));
+        }
+
         // remove inconsistencies
         #[allow(clippy::integer_arithmetic)] // TODO: overflow of log index should be prevented
         state.log.truncate((req.prev_log_index + 1).numeric_cast());
@@ -580,10 +591,8 @@ impl<C: 'static + Command> Protocol<C> {
         }
 
         // append new logs
-        let entries = req
-            .entries()
-            .map_err(|e| tonic::Status::internal(format!("encode or decode error, {}", e)))?;
-        state.log.extend(entries.into_iter());
+
+        state.log.append(&mut entries);
 
         // update commit index
         let prev_commit_index = state.commit_index;
