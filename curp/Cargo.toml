@@ -35,6 +35,7 @@ flume = "0.10.14"
 indexmap = "1.9.2"
 tower = { version = "0.4.13", features = ["filter"] }
 engine = { path = "../engine" }
+async-stream = "0.3.4"
 
 [dev-dependencies]
 itertools = "0.10.3"

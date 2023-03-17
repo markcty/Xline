@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     fmt::Display,
+    io::{self, Cursor, Read, SeekFrom, Write},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -14,6 +15,7 @@ use curp::{
     cmd::{Command, CommandExecutor, ConflictCheck, ProposeId},
     LogIndex,
 };
+use engine::{engine_api::SnapshotApi, memory_engine::MemorySnapshot};
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
@@ -189,12 +191,33 @@ impl CommandExecutor<TestCommand> for TestCE {
         Ok(index)
     }
 
-    async fn reset(&self) {
-        self.store.lock().clear();
-    }
-
     fn last_applied(&self) -> Result<LogIndex, ExecuteError> {
         Ok(self.last_applied.load(Ordering::Relaxed))
+    }
+
+    async fn snapshot(&self) -> Result<Box<dyn SnapshotApi>, Self::Error> {
+        let mut ss = MemorySnapshot::default();
+        bincode::serialize_into(&mut ss, &*self.store.lock()).unwrap();
+        Ok(Box::new(ss))
+    }
+
+    async fn reset(
+        &self,
+        snapshot: Option<(Box<dyn SnapshotApi>, LogIndex)>,
+    ) -> Result<(), Self::Error> {
+        let Some((mut snapshot, index)) = snapshot else {
+            self.store.lock().clear();
+            self.last_applied.store(0, Ordering::Relaxed);
+            return Ok(());
+        };
+        self.last_applied
+            .store(index.numeric_cast(), Ordering::Relaxed);
+        snapshot.rewind().unwrap();
+        let mut store_w = self.store.lock();
+        let mut buffer = vec![];
+        snapshot.read_to_end(&mut buffer).unwrap();
+        *store_w = bincode::deserialize(buffer.as_slice()).unwrap();
+        Ok(())
     }
 }
 

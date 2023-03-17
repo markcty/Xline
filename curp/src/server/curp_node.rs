@@ -1,8 +1,15 @@
-use std::{collections::HashMap, fmt::Debug, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    fmt::Debug,
+    io::{self, Write},
+    sync::Arc,
+    time::Duration,
+};
 
 use clippy_utilities::NumericCast;
+use engine::{engine_api::SnapshotApi, memory_engine::MemorySnapshot};
 use event_listener::Event;
-use futures::{pin_mut, stream::FuturesUnordered, StreamExt};
+use futures::{pin_mut, stream::FuturesUnordered, Stream, StreamExt};
 use madsim::rand::{thread_rng, Rng};
 use parking_lot::{Mutex, RwLock};
 use thiserror::Error;
@@ -16,7 +23,7 @@ use utils::config::CurpConfig;
 
 use super::{
     cmd_board::{CmdBoardRef, CommandBoard},
-    cmd_worker::start_cmd_workers,
+    cmd_worker::{conflict_checked_mpmc, start_cmd_workers, CEEventTx},
     gc::run_gc_tasks,
     raw_curp::{AppendEntries, RawCurp, TickAction, Vote},
     spec_pool::{SpecPoolRef, SpeculativePool},
@@ -28,10 +35,13 @@ use crate::{
     log_entry::LogEntry,
     rpc::{
         self, connect::ConnectApi, AppendEntriesRequest, AppendEntriesResponse, FetchLeaderRequest,
-        FetchLeaderResponse, ProposeRequest, ProposeResponse, VoteRequest, VoteResponse,
-        WaitSyncedRequest, WaitSyncedResponse,
+        FetchLeaderResponse, InstallSnapshotRequest, InstallSnapshotResponse, ProposeRequest,
+        ProposeResponse, VoteRequest, VoteResponse, WaitSyncedRequest, WaitSyncedResponse,
     },
-    server::storage::rocksdb::RocksDBStorage,
+    server::{
+        cmd_worker::CEEventTxApi, raw_curp::CalibrateAction, storage::rocksdb::RocksDBStorage,
+    },
+    snapshot::{Snapshot, SnapshotMeta},
     LogIndex, ServerId, TxFilter,
 };
 
@@ -50,8 +60,14 @@ pub(super) enum CurpError {
     /// Storage error
     #[error("storage error, {0}")]
     Storage(#[from] StorageError),
-    /// Get applied index error
-    #[error("internal error {0}")]
+    /// Transport error
+    #[error("transport error, {0}")]
+    Transport(String),
+    /// Io error
+    #[error("io error, {0}")]
+    IO(#[from] io::Error),
+    /// Internal error
+    #[error("internal error, {0}")]
     Internal(String),
 }
 
@@ -65,6 +81,8 @@ pub(super) struct CurpNode<C: Command> {
     cmd_board: CmdBoardRef<C>,
     /// Shutdown trigger
     shutdown_trigger: Arc<Event>,
+    /// CE event tx,
+    ce_event_tx: CEEventTx<C>,
     /// Storage
     storage: Arc<dyn StorageApi<Command = C>>,
 }
@@ -145,7 +163,7 @@ impl<C: 'static + Command> CurpNode<C> {
         let (er, asr) = CommandBoard::wait_for_er_asr(&self.cmd_board, &id).await;
         let resp = WaitSyncedResponse::new_from_result::<C>(Some(er), asr)?;
 
-        debug!("{} wait synced for cmd({id}) finishes", self.curp.id());
+        debug!("{} wait synced for cmd({id} finishes", self.curp.id());
         Ok(resp)
     }
 
@@ -157,6 +175,58 @@ impl<C: 'static + Command> CurpNode<C> {
     ) -> Result<FetchLeaderResponse, CurpError> {
         let (leader_id, term) = self.curp.leader();
         Ok(FetchLeaderResponse::new(leader_id, term))
+    }
+
+    /// Install snapshot
+    #[allow(clippy::integer_arithmetic)] // can't overflow
+    pub(super) async fn install_snapshot(
+        &self,
+        req_stream: impl Stream<Item = Result<InstallSnapshotRequest, String>>,
+    ) -> Result<InstallSnapshotResponse, CurpError> {
+        pin_mut!(req_stream);
+        let mut snapshot = MemorySnapshot::default();
+        while let Some(req) = req_stream.next().await {
+            let req = req.map_err(|e| {
+                warn!("snapshot stream error, {e}");
+                CurpError::Transport(e)
+            })?;
+            if !self.curp.verify_install_snapshot(
+                req.term,
+                req.leader_id,
+                req.last_included_index.numeric_cast(),
+                req.last_included_term,
+            ) {
+                return Ok(InstallSnapshotResponse::new(self.curp.term()));
+            }
+            snapshot.write_all(req.data.as_slice())?;
+            if req.done {
+                debug_assert_eq!(
+                    snapshot.size(),
+                    req.offset + req.data.len().numeric_cast::<u64>(),
+                    "snapshot corrupted"
+                );
+                info!("successfully receive a snapshot, size: {}", snapshot.size());
+                let meta = SnapshotMeta {
+                    last_included_index: req.last_included_index.numeric_cast(),
+                    last_included_term: req.last_included_term,
+                };
+                let snapshot = Snapshot::new(meta, Box::new(snapshot));
+                self.ce_event_tx
+                    .send_reset(Some(snapshot))
+                    .await
+                    .map_err(|err| {
+                        let err = CurpError::Internal(format!(
+                            "failed to reset the command executor by snapshot, {err}"
+                        ));
+                        error!("{err}");
+                        err
+                    })?;
+                return Ok(InstallSnapshotResponse::new(self.curp.term()));
+            }
+        }
+        Err(CurpError::Transport(
+            "failed to receive a complete snapshot".to_owned(),
+        ))
     }
 }
 
@@ -235,17 +305,9 @@ impl<C: 'static + Command> CurpNode<C> {
         let last_applied = cmd_executor
             .last_applied()
             .map_err(|e| CurpError::Internal(format!("get applied index error, {e}")))?;
+        let (ce_event_tx, task_rx, done_tx) = conflict_checked_mpmc::channel();
 
         let storage = Arc::new(RocksDBStorage::new(&curp_cfg.data_dir)?);
-
-        // start cmd workers
-        let exe_tx = start_cmd_workers(
-            cmd_executor,
-            Arc::clone(&spec_pool),
-            Arc::clone(&uncommitted_pool),
-            Arc::clone(&cmd_board),
-            Arc::clone(&shutdown_trigger),
-        );
 
         // create curp state machine
         let (voted_for, entries) = storage.recover().await?;
@@ -258,7 +320,7 @@ impl<C: 'static + Command> CurpNode<C> {
                 Arc::clone(&spec_pool),
                 uncommitted_pool,
                 curp_cfg,
-                Box::new(exe_tx),
+                Box::new(ce_event_tx.clone()),
                 sync_tx,
                 calibrate_tx,
                 log_tx,
@@ -278,7 +340,7 @@ impl<C: 'static + Command> CurpNode<C> {
                 Arc::clone(&spec_pool),
                 uncommitted_pool,
                 curp_cfg,
-                Box::new(exe_tx),
+                Box::new(ce_event_tx.clone()),
                 sync_tx,
                 calibrate_tx,
                 log_tx,
@@ -288,6 +350,13 @@ impl<C: 'static + Command> CurpNode<C> {
             ))
         };
 
+        start_cmd_workers(
+            cmd_executor,
+            Arc::clone(&curp),
+            task_rx,
+            done_tx,
+            Arc::clone(&shutdown_trigger),
+        );
         run_gc_tasks(Arc::clone(&cmd_board), Arc::clone(&spec_pool));
 
         let curp_c = Arc::clone(&curp);
@@ -316,6 +385,7 @@ impl<C: 'static + Command> CurpNode<C> {
             spec_pool,
             cmd_board,
             shutdown_trigger,
+            ce_event_tx,
             storage,
         })
     }
@@ -432,60 +502,89 @@ impl<C: 'static + Command> CurpNode<C> {
         let (rpc_timeout, retry_timeout) = (curp.cfg().rpc_timeout, curp.cfg().retry_timeout);
         loop {
             // send append entry
-            let Ok(ae) = curp.append_entries(connect.id()) else {
+            let Ok(action) = curp.calibrate(connect.id()) else {
                 return;
             };
-            let last_sent_index = ae.prev_log_index + ae.entries.len().numeric_cast::<u64>();
-            let req = match AppendEntriesRequest::new(
-                ae.term,
-                ae.leader_id,
-                ae.prev_log_index,
-                ae.prev_log_term,
-                ae.entries,
-                ae.leader_commit,
-            ) {
-                Err(e) => {
-                    error!("unable to serialize append entries request: {}", e);
-                    return;
-                }
-                Ok(req) => req,
-            };
-
-            let resp = connect.append_entries(req, rpc_timeout).await;
-
-            #[allow(clippy::unwrap_used)]
-            // indexing of `next_index` or `match_index` won't panic because we created an entry when initializing the server state
-            match resp {
-                Err(e) => {
-                    warn!("append_entries error: {e}");
-                }
-                Ok(resp) => {
-                    let resp = resp.into_inner();
-
-                    let result = curp.handle_append_entries_resp(
-                        connect.id(),
-                        Some(last_sent_index),
-                        resp.term,
-                        resp.success,
-                        resp.hint_index,
-                    );
-
-                    match result {
-                        Ok(true) => {
-                            debug!(
-                                "{} successfully calibrates follower {}",
-                                curp.id(),
-                                connect.id()
-                            );
+            match action {
+                CalibrateAction::AppendEntries(ae) => {
+                    let last_sent_index =
+                        ae.prev_log_index + ae.entries.len().numeric_cast::<u64>();
+                    let req = match AppendEntriesRequest::new(
+                        ae.term,
+                        ae.leader_id,
+                        ae.prev_log_index,
+                        ae.prev_log_term,
+                        ae.entries,
+                        ae.leader_commit,
+                    ) {
+                        Err(e) => {
+                            error!("unable to serialize append entries request: {}", e);
                             return;
                         }
-                        Ok(false) => {}
-                        Err(()) => {
-                            return;
+                        Ok(req) => req,
+                    };
+
+                    let resp = connect.append_entries(req, rpc_timeout).await;
+
+                    #[allow(clippy::unwrap_used)]
+                    // indexing of `next_index` or `match_index` won't panic because we created an entry when initializing the server state
+                    match resp {
+                        Err(e) => {
+                            warn!("append_entries error: {e}");
+                        }
+                        Ok(resp) => {
+                            let resp = resp.into_inner();
+                            let result = curp.handle_append_entries_resp(
+                                connect.id(),
+                                Some(last_sent_index),
+                                resp.term,
+                                resp.success,
+                                resp.hint_index.numeric_cast(),
+                            );
+                            match result {
+                                Ok(true) => {
+                                    debug!(
+                                        "{} successfully calibrates follower {}",
+                                        curp.id(),
+                                        connect.id()
+                                    );
+                                    return;
+                                }
+                                Ok(false) => {}
+                                Err(()) => {
+                                    return;
+                                }
+                            }
+                        }
+                    };
+                }
+                CalibrateAction::Snapshot(rx) => match rx.await {
+                    Ok(snapshot) => {
+                        let meta = snapshot.meta;
+                        let resp = connect
+                            .install_snapshot(curp.term(), curp.id().clone(), snapshot)
+                            .await;
+                        match resp {
+                            Err(e) => {
+                                warn!("failed to send install_snapshot to follower, {e}");
+                            }
+                            Ok(resp) => {
+                                let resp = resp.into_inner();
+                                if curp
+                                    .handle_snapshot_resp(connect.id(), meta, resp.term)
+                                    .is_err()
+                                {
+                                    return;
+                                };
+                            }
                         }
                     }
-                }
-            };
+                    Err(err) => {
+                        warn!("failed to receive snapshot result, {err}");
+                    }
+                },
+            }
+
             tokio::time::sleep(retry_timeout).await;
         }
     }
@@ -612,6 +711,7 @@ impl<C: Command> Debug for CurpNode<C> {
 
 #[cfg(test)]
 mod tests {
+    use tokio::sync::oneshot;
     use tracing_test::traced_test;
     use utils::config::default_retry_timeout;
 
@@ -662,7 +762,9 @@ mod tests {
     async fn send_log_will_stop_after_new_election() {
         let curp = {
             let mut exe_tx = MockCEEventTxApi::<TestCommand>::default();
-            exe_tx.expect_send_reset().returning(|| ());
+            exe_tx
+                .expect_send_reset()
+                .returning(|_| oneshot::channel().1);
             Arc::new(RawCurp::new_test(3, exe_tx))
         };
 
@@ -697,7 +799,9 @@ mod tests {
     async fn send_log_will_succeed_and_commit() {
         let curp = {
             let mut exe_tx = MockCEEventTxApi::<TestCommand>::default();
-            exe_tx.expect_send_reset().returning(|| ());
+            exe_tx
+                .expect_send_reset()
+                .returning(|_| oneshot::channel().1);
             exe_tx.expect_send_after_sync().returning(|_, _| ());
             Arc::new(RawCurp::new_test(3, exe_tx))
         };
@@ -733,6 +837,9 @@ mod tests {
     async fn leader_will_calibrate_follower_until_succeed() {
         let curp = {
             let mut exe_tx = MockCEEventTxApi::<TestCommand>::default();
+            exe_tx
+                .expect_send_reset()
+                .returning(|_| oneshot::channel().1);
             exe_tx.expect_send_after_sync().returning(|_, _| ());
             Arc::new(RawCurp::new_test(3, exe_tx))
         };

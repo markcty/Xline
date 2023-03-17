@@ -1,5 +1,5 @@
 use std::{
-    io::{Read, Write},
+    io::{Read, Seek, Write},
     path::Path,
 };
 
@@ -80,7 +80,7 @@ impl WriteOperation {
 }
 
 /// This trait is a abstraction of the snapshot, We can Read/Write the snapshot like a file.
-pub trait SnapshotApi: Read + Write {
+pub trait SnapshotApi: Read + Write + Seek + Send + Sync {
     /// Get the size of the snapshot
     fn size(&self) -> u64;
 }

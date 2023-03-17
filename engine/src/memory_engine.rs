@@ -1,7 +1,7 @@
 use std::{
     cmp::Ordering,
     collections::HashMap,
-    io::{self, Cursor, Read, Write},
+    io::{self, Cursor, Read, Seek, Write},
     path::Path,
     sync::Arc,
 };
@@ -47,6 +47,13 @@ impl Write for MemorySnapshot {
     #[inline]
     fn flush(&mut self) -> io::Result<()> {
         self.data.flush()
+    }
+}
+
+impl Seek for MemorySnapshot {
+    #[inline]
+    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+        self.data.seek(pos)
     }
 }
 

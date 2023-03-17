@@ -1,7 +1,7 @@
 use std::{
     cmp::Ordering,
     fs::{self, File},
-    io::{self, Cursor, Error as IoError, ErrorKind::Other, Read, Write},
+    io::{self, Cursor, Error as IoError, ErrorKind::Other, Read, Seek, Write},
     iter::repeat,
     path::{Path, PathBuf},
     sync::Arc,
@@ -98,6 +98,14 @@ pub struct RocksSnapshot {
     file_index: usize,
     /// current file
     current_file: Option<File>,
+}
+
+impl Seek for RocksSnapshot {
+    #[allow(clippy::todo)]
+    #[inline]
+    fn seek(&mut self, _pos: io::SeekFrom) -> io::Result<u64> {
+        todo!("implement seek for rocksdb snapshot");
+    }
 }
 
 impl RocksSnapshot {
